@@ -1,0 +1,739 @@
+---
+title: 'The Pronunciation of the Word "Māori"'
+author: ""
+date: "30/08/2023"
+output:
+  bookdown::html_document2:
+    fig_caption: true
+    toc: true
+    toc_float: true
+    theme: flatly
+    collapsed: no
+    df_print: paged
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{=html}
+<style>
+.list-group-item.active, .list-group-item.active:focus, .list-group-item.active:hover {
+    background-color: #95A044;
+}
+
+pre {
+  max-height: 300px;
+  overflow-y: 300px;
+}
+</style>
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  fig.align='center', 
+  warning = FALSE,
+  message = FALSE
+)
+```
+# Overview
+
+This document presents the analysis steps and results for 'The Pronunciation of the Word "Māori"'.
+
+The following sections cover:
+
+1. loading data and libraries,
+2. initial data examination,
+3. the binary flap model,
+4. the binary diphthong model, and
+5. the diphthong ratio model.
+
+***NB:*** we are not able to share the data for this project due to
+research ethics commitments. We provide this markdown to indicate the data
+processing steps which we have carried out and to provide.
+
+
+# Load data and libraries
+
+We load the required libraries.
+
+```{r}
+# Tidyverse contains plotting and data manipulation functions used throughout
+# this markdown file.
+library(tidyverse)
+library(gt) # gt provides additional table output options.
+
+# Linear mixed modelling
+library(lme4)
+library(effects)
+library(emmeans)
+```
+
+We read in the data and create a binary variable indicating whether a token 
+is a diphthong or not. All diphthong tokens have a 'ratio' of /a:/ to /o/, so
+we can create a binary variable by indicating 'not diphthong' for every token
+without a ratio.
+
+```{r}
+merged_data <- read_rds('merged_data.rds')
+
+merged_data <- merged_data |> 
+  # Store flap info as a factor for modelling.
+  mutate(
+    Flap = as.factor(Flap),
+    generation = factor(
+      merged_data$generation, levels=c("Hist", "TK", "Pres", "L1", "L2")
+    ),
+    Ratio = as.numeric(str_replace_all(Ratio, ",", "\\."))
+  )
+
+filtered_data <- merged_data |>
+  # Remove Tūhoe speakers (for models with gender)
+  filter(
+    !generation == "TK"
+  ) |> 
+  # create diphthong variable. Ngāi Tūhoe speakers were not included in the 
+  # diphthong models as gender was found to be significant.
+  mutate(
+    diphthong = as.factor(if_else(is.na(Ratio), 'n', 'y'))
+  )
+```
+
+# Data exploration
+
+What variables do we have?
+```{r}
+column_descriptions_initial <- c(
+  "Search term used in LaBB-CAT",
+  "Number of result",
+  "Name of transcript",
+  "Speaker name",
+  "Speaker gender (binary)",
+  "Language being spoken",
+  "Speaker year of birth",
+  "Speaker region",
+  "Start time of transcript line (s)",
+  "End time of transcript line (s)",
+  "LaBB-CAT token identifier",
+  "URL to access token in LaBB-CAT",
+  "Previous segment",
+  "Word (with whitespace removed)",
+  "Following segment",
+  "Word from LaBB-CAT text layer",
+  "Onset of word (s)",
+  "Offset of word (s)",
+  "Word without punctuation",
+  "Binary flap variable (y/n)",
+  "Length of /a:/",
+  "Length of /o/",
+  "Ratio of /a:/ to /o/",
+  "Comments concerning token",
+  "MAONZE group identifier",
+  "Speaker code without language identifier",
+  "MAONZE generation category",
+  "Binary diphthong variable (y/n)"
+)
+
+data_table <- tibble(
+  `Variable Name` = names(filtered_data),
+  Type = reframe(filtered_data, across(everything(), class)) |> as_vector(),
+  Description = column_descriptions_initial
+)
+
+data_table <- data_table %>% 
+  gt() %>% 
+  tab_header(
+    title = "Variables in the data set"
+  )
+
+data_table
+```
+
+
+We check for balanced data across our classes.
+
+```{r}
+table(merged_data$participant_gender, merged_data$participant_language)
+```
+
+```{r}
+table(
+  merged_data$participant_gender, 
+  merged_data$participant_language, 
+  merged_data$generation
+)
+```
+
+Note the absence of female speakers in the Tūhoe generation. As noted above,
+we exclude Tūhoe data from models with gender in the predictor variables.
+
+What does the raw data look like?
+
+```{r}
+merged_data |> 
+  group_by(CleanSpeaker, generation, participant_gender, participant_language) |> 
+  summarise(
+    total = n(),
+    flap = sum(Flap == "y"),
+    prop = flap/total
+  ) |> 
+  ggplot(
+    aes(
+      x = interaction(generation, participant_gender),
+      y = prop,
+      colour = participant_language,
+    )
+  ) +
+  geom_boxplot() +
+  geom_jitter() +
+  labs(
+    title = "Generation and gender by flap proportion",
+  ) +
+  theme_bw()
+```
+
+The results for `Hist.F` look extreme. We double checked these values and found
+no reason to doubt them.
+
+We can also consider the variation between individual speakers in flap
+proportion.
+```{r speaker-props, fig.cap = "Proportion flaps for speakers across languages. Thick lines are means for each category of speaker."}
+speaker_data <- merged_data |> 
+  group_by(CleanSpeaker, generation, participant_gender, participant_language) |> 
+  summarise(
+    total = n(),
+    flap = sum(Flap == "y"),
+    prop = flap/total
+  )
+
+mean_props <- speaker_data |> 
+  ungroup() |> 
+  group_by(generation, participant_gender, participant_language) |> 
+  mutate(
+    prop = mean(prop)
+  )
+
+speaker_data |> 
+  ggplot(
+    aes(
+      x = participant_language,
+      y = prop,
+      group = CleanSpeaker,
+      colour = generation,
+      shape = participant_gender
+    )
+  ) +
+  geom_line(alpha = 0.4) +
+  geom_point(alpha = 0.4) +
+  geom_line(
+    data = mean_props,
+    linewidth = 2
+  ) +
+  geom_point(
+    data = mean_props,
+    size = 5
+  ) +
+  labs(
+    title = "Speaker flap proportions across languages",
+    subtitle = "Speaker values and means for each category",
+    colour = "Generation",
+    shape = "Gender",
+    x = "Language",
+    y = "Proportion of flapped /r/"
+  ) +
+  theme_bw()
+```
+
+Figure \@ref(fig:speaker-props) already indicates some differences across 
+categories.
+
+What about for the diphthong variable?
+```{r speaker-diphs, fig.cap = "Proportion dipthongs for speakers across languages. Thick lines are means for each category of speaker."}
+speaker_data <- filtered_data |> 
+  group_by(CleanSpeaker, generation, participant_gender, participant_language) |> 
+  summarise(
+    total = n(),
+    flap = sum(diphthong == "y"),
+    prop = flap/total
+  )
+
+mean_props <- speaker_data |> 
+  ungroup() |> 
+  group_by(generation, participant_gender, participant_language) |> 
+  mutate(
+    prop = mean(prop)
+  )
+
+speaker_data |> 
+  ggplot(
+    aes(
+      x = participant_language,
+      y = prop,
+      group = CleanSpeaker,
+      colour = generation,
+      shape = participant_gender
+    )
+  ) +
+  geom_line(alpha = 0.4) +
+  geom_point(alpha = 0.4) +
+  geom_line(
+    data = mean_props,
+    linewidth = 2
+  ) +
+  geom_point(
+    data = mean_props,
+    size = 5
+  ) +
+  labs(
+    title = "Speaker diphthong proportions across languages",
+    subtitle = "Speaker values and means for each category",
+    colour = "Generation",
+    shape = "Gender",
+    x = "Language",
+    y = "Proportion of diphthongs"
+  ) +
+  theme_bw()
+```
+
+In Figure \@ref(fig:speaker-diphs), Diphthong rates seem high across the board with the exception of two male 
+present day kaumātua while speaking English. 
+
+Finally, what does the ratio variable look like?
+```{r all-ratio}
+filtered_data |> 
+  ggplot(
+    aes(
+      x = Ratio,
+      colour = participant_language
+    )
+  ) +
+  geom_freqpoly() +
+  facet_grid(rows = vars(generation), cols = vars(participant_gender))
+```
+
+There are no obvious patterns in the distributions of dipthong ratio. All values
+look sensible.
+
+# Flap model
+
+## Without Tūhoe speakers
+
+For all models, we start with a maximal structure with three way interactions
+for language, gender, and generation, along with random intercepts and slopes
+on language for each speaker. If none of the coefficients for a predictor are
+significant at the 0.05 level, we remove the predictor from subsequent models.
+
+The following code fits the first model.
+```{r}
+Flapmodel0 <- glmer(
+  # Dependent variable
+  Flap ~ 
+    # Independent variables / Main effects / predictors
+    generation * participant_gender * participant_language + 
+    # Random effects
+    (1 + participant_language|CleanSpeaker), 
+  # Family binomial because it's a 'yes or no' modelling problem.
+  family = "binomial", 
+  # Tell it the dataset.
+  data = filtered_data, 
+  # Some magic words to give the model additional time to 'converge'.
+  glmerControl(optimizer = "nlminbwrap", optCtrl = list(maxfun = 1e7)),
+  # Optimizer chosen using 'allFit' function
+)
+```
+
+Let's have a look at this model. First the summary.
+
+```{r}
+summary(Flapmodel0)
+```
+
+The following description was written from one author to another. We leave it
+in in case it is useful for any readers.
+
+These values are a bit inscrutable by themselves. We will plot some effects in 
+a moment to help understand them. But some general patterns are clear.
+The first thing to look at is the `(Intercept)` value. This is the estimate for
+the base level of the `generation` variable (i.e., `r levels(filtered_data$generation)[[1]]`).
+
+The historical female speakers have a statistically significant (see the star)
+estimate of `-2.32`. 'Significance' here means that the model is confident
+that the true value is not `0`. The fact that the estimate is lower than 0 
+(i.e., is negative), means the model estimates female
+historical speakers, speaking English, to have a lower than 50/50 chance of
+flapping.
+
+The other values in the summary are interpreted with respect to the base level.
+We add or subtract the values to the base level. e.g. to get the estimate for
+historical male speakers speaking English, we add the value for
+`participant_genderM` (`0.21409`) to the coefficient above (`-2.32`) to get
+(`r -2.32 + 0.21409`) this value is still negative, so the model still takes
+male historical speakers to have a lower than 50/50 chance of flapping while
+speaking English. But note, the value for `participant_genderM` is not 
+statistically significant (there's no star in the relevant row of the table). 
+So the model is not confident that there is in reality any difference in the 
+proportion of flapping between the genders in the historical speakers.
+
+Before visualising, we continue to backfit. Note that none of the three way
+interactions terms in the summary above are statistically significant. We fit
+a new model without three way interactions.
+
+```{r}
+Flapmodel1 <- glmer(
+  # Dependent variable
+  Flap ~ 
+    # Independent variables / Main effects
+    generation + participant_language + participant_gender +  
+    generation : participant_language +
+    generation : participant_gender +
+    participant_language : participant_gender + 
+    # Random effects
+    (1 + participant_language|CleanSpeaker), 
+  # Family binomial because it's a 'yes or no' modelling problem.
+  family = "binomial", 
+  # Tell it the dataset.
+  data = filtered_data, 
+  # Some magic words to give the model additional time to 'congerge'.
+  glmerControl(optimizer = "nlminbwrap", optCtrl = list(maxfun = 1e7))
+)
+```
+
+```{r}
+summary(Flapmodel1)
+```
+
+Now note that none of the terms with gender appear significant. We remove these
+too.
+
+```{r}
+Flapmodel2 <- glmer(
+  # Dependent variable
+  Flap ~ 
+    # Independent variables / Main effects
+    generation * participant_language +
+    # Random effects
+    (1 + participant_language|CleanSpeaker), 
+  # Family binomial because it's a 'yes or no' modelling problem.
+  family = "binomial", 
+  # Tell it the dataset.
+  data = filtered_data, 
+  # Some magic words to give the model additional time to 'congerge'.
+  glmerControl(optimizer = "nlminbwrap", optCtrl = list(maxfun = 1e7))
+)
+```
+
+```{r}
+summary(Flapmodel2)
+```
+All terms are significant in this model. 
+
+We now turn to plotting model
+estimates.
+
+```{r flap-model-out, fig.cap="Predicted flap proportions with 95% confidence intervals."}
+mod_effects <- effect(
+  term='generation:participant_language',
+  mod=Flapmodel2
+)
+
+to_plot <- as_tibble(mod_effects)
+
+to_plot |> 
+  ggplot(
+    aes(
+      x = generation,
+      y = fit, 
+      colour = participant_language
+    )
+  ) +
+  # add points
+  # 'position_dodge' separates the two languages on the plot.
+  # If you increase the width, the points get further apart.
+  # If you change the value, change it in the code for the error bars
+  # below as well.
+  geom_point(position = position_dodge(width=0.5)) +
+  # add errorbars
+  geom_errorbar(
+    aes(
+      ymin = lower, 
+      ymax = upper
+    ),
+    position = position_dodge(width=0.5),
+    width = 0.4 # width of error bars.
+  ) +
+  labs(
+    y = "Proportion of flapped /r/ (predicted)",
+    x = "Generation",
+    colour = "Language"
+  ) +
+  theme_bw() +
+  scale_colour_grey(start = 0.6, end = 0)
+```
+
+Figure \@ref(fig:flap-model-out) provides a much clearer indication of what
+is going on in this model. There is a large difference in flap proportion 
+when speaking English and when speaking Māori. This difference seems reduced in
+the present day kaumātua, and is not present at all in the contemporary L1 and
+L2 speakers.
+
+We generate p-values for these contrasts using the `emmeans` package.
+
+```{r}
+model.emm <- emmeans(Flapmodel2, specs = ~ generation * participant_language)
+contrast(model.emm, "pairwise", simple = "participant_language")
+```
+These p-values match our visual judgement, where the historical and present
+day generations have p-values less than 0.05 for the contrast between English
+and Māori.
+
+As a final check, to ensure we have the right model, we use the `anova` function.
+```{r}
+anova(Flapmodel0, Flapmodel1, Flapmodel2)
+```
+The results above indicate that our final model is the best of the models
+considered. 
+
+## With Tūhoe speakers
+
+Since gender is not significant, we add the Tūhoe data back into the model.
+
+```{r}
+Flapmodel2Tūhoe <- glmer(
+  # Dependent variable
+  Flap ~ 
+    # Independent variables / Main effects
+    generation * participant_language +
+    # Random effects
+    (1 + participant_language|CleanSpeaker), 
+  # Family binomial because it's a 'yes or no' modelling problem.
+  family = "binomial", 
+  # Tell it the dataset.
+  data = merged_data, 
+  # Some magic words to give the model additional time to 'congerge'.
+  glmerControl(optimizer = "nlminbwrap", optCtrl = list(maxfun = 1e7))
+)
+```
+
+```{r}
+summary(Flapmodel2Tūhoe)
+```
+All terms again come out as significant. But is there a significant difference
+for Tūhoe of language? We again plot and use `emmeans`.
+
+```{r tuhoe-output, fig.cap = "Model predictions for flap variable with Tūhoe data added."}
+mod_effects <- effect(
+  term='generation:participant_language',
+  mod=Flapmodel2Tūhoe
+)
+
+to_plot <- as_tibble(mod_effects)
+
+figure_6 <- to_plot |> 
+  mutate(
+    participant_language = if_else(
+      participant_language == "Maori", "Māori", participant_language
+    )
+  ) |> 
+  ggplot(
+    aes(
+      x = generation,
+      y = fit, 
+      colour = participant_language
+    )
+  ) +
+  # add points
+  # 'position_dodge' separates the two languages on the plot.
+  # If you increase the width, the points get further apart.
+  # If you change the value, change it in the code for the error bars
+  # below as well.
+  geom_point(position = position_dodge(width=0.5)) +
+  # add errorbars
+  geom_errorbar(
+    aes(
+      ymin = lower, 
+      ymax = upper
+    ),
+    position = position_dodge(width=0.5),
+    width = 0.4 # width of error bars.
+  ) +
+  labs(
+    y = "Proportion of flapped /r/ (predicted)",
+    x = "Generation",
+    colour = "Language"
+  ) +
+  theme_bw()  +
+  scale_colour_grey(start = 0.6, end = 0)
+
+# save for publication
+ggsave(
+  'figure_6.tiff',
+  plot = figure_6,
+  units = "in",
+  dpi = 500,
+  width = 7,
+  height = 5
+)
+
+figure_6
+```
+
+Figure \@ref(fig:tuhoe-output) suggests that there is no significant effect
+of language for the Tūhoe speakers.
+
+We again use `emmeans`
+```{r}
+model.emm <- emmeans(Flapmodel2Tūhoe, specs = ~ generation * participant_language)
+contrast(model.emm, "pairwise", by = "generation")
+```
+Our visual judgement of no significant effect of language for Tūhoe speakers is 
+confirmed by the p-value above (0.1458).
+
+Is there any evidence of difference in flapping between generations _within_
+each language?
+```{r}
+contrast(model.emm, "consec", by = "participant_language", adjust = "bonferroni")
+```
+Tūhoe differ in their flap proportion while speaking te reo Māori.
+
+# Binary diphthong analysis
+
+We now apply the same approach to the binary diphthong variable. 
+
+```{r}
+Dmodel0 <- glmer(
+  # Dependent variable
+  diphthong ~ 
+    # Independent variables / Main effects
+    generation * participant_gender * participant_language + 
+    # Random effects
+    (1 + participant_language|CleanSpeaker), 
+  # Family binomial because it's a 'yes or no' modelling problem.
+  family = "binomial", 
+  # Tell it the dataset.
+  data = filtered_data, 
+  # Some magic words to give the model additional time to 'converge'.
+  glmerControl(optimizer = "nlminbwrap", optCtrl = list(maxfun = 1e7)),
+  # Optimizer chosen using 'AllFit' - most don't fit as we're at the limits of 
+  # what we can fit with these data.
+)
+```
+
+Let's have a look at the summary.
+
+```{r}
+summary(Dmodel0)
+```
+
+No terms appear as significant, so we leave this variable behind.
+
+# Diphthong ratio model
+
+We now backfit using the diphthong ratio variable. This time we use a linear 
+model, as the data is continuous.
+
+```{r}
+Rmodel0 <- lmer(
+  # Dependent variable
+  Ratio ~ 
+    # Independent variables / Main effects
+    generation * participant_gender * participant_language + 
+    # Random effects
+    (1 + participant_language|CleanSpeaker), 
+  # Tell it the dataset.
+  data = filtered_data, 
+  # Some magic words to give the model additional time to 'converge'.
+  ## lmerControl(optimizer = "nlminbwrap", optCtrl = list(maxfun = 1e7)),
+  # Optimizer chosen using 'AllFit' - most don't fit as we're at the limits of 
+  # what we can fit with these data.
+)
+```
+
+```{r}
+summary(Rmodel0)
+```
+These linear models do not give p-values. We use t-values great than 2 as a 
+rough heuristic for keeping terms in our model. In this case, each term has
+at least one 'significant' coefficient.
+
+We check the residuals of the model to ensure that they are evenly distributed
+around 0:
+```{r}
+plot(Rmodel0)
+```
+And check the qq plot:
+```{r}
+qqnorm(residuals(Rmodel0))
+qqline(residuals(Rmodel0), datax = FALSE, distribution = qnorm,
+       probs = c(0.25, 0.75), qtype = 7, col="red")
+```
+
+Both look OK!
+
+We plot contrasts:
+
+```{r}
+mod_effects <- effect(
+  term='generation:participant_gender:participant_language',
+  mod=Rmodel0
+)
+
+to_plot <- as_tibble(mod_effects)
+
+figure_7 <- to_plot |> 
+  mutate(
+    participant_language = if_else(
+      participant_language == "Maori", "Māori", participant_language
+    )
+  ) |> 
+  ggplot(
+    aes(
+      x = generation,
+      y = fit, 
+      colour = participant_language
+    )
+  ) +
+  # add points
+  geom_point(position = position_dodge(width=0.5)) +
+  # add errorbars
+  geom_errorbar(
+    aes(
+      ymin = lower, 
+      ymax = upper
+    ),
+    position = position_dodge(width=0.5),
+    width = 0.4 # width of error bars.
+  ) +
+  labs(
+    y = "Ratio of diphthong (predicted)",
+    x = "Generation",
+    colour = "Language"
+  ) +
+  theme_bw()  +
+  scale_colour_grey(start = 0.6, end = 0) +
+  # split by gender
+  facet_grid(rows = vars(participant_gender)) 
+
+# save for publication
+ggsave(
+  'figure_7.tiff',
+  plot = figure_7,
+  units = "in",
+  dpi = 500,
+  width = 7,
+  height = 5
+)
+
+figure_7
+```
+
+This is a complicated story!
+
+```{r}
+model.emm <- emmeans(Rmodel0, specs = ~ generation * participant_gender * participant_language)
+contrast(model.emm, "consec", simple="each",  adjust="bonferroni")
+```
+
+In most cases with a significant language effect, there is an increase in the 
+relative length of /a:/. The exception to this is the historical female 
+speakers, who seem to reduce the relative length of /a:/ while speaking
+te reo Māori. These results are discussed further in the paper. 
